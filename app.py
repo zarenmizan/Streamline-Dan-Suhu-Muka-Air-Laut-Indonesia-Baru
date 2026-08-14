@@ -30,6 +30,20 @@ st.set_page_config(
 
 FOOTER_TEXT = "Data: NOAA/PSL & NCEP GFS  |  @ Stasiun Klimatologi Jawa Tengah"
 
+
+def tambah_fitur_aman(ax, feature, **kwargs):
+    """Tambahkan fitur peta (LAND/OCEAN/COASTLINE/BORDERS) dengan aman.
+
+    Beberapa geometri di data Natural Earth kadang tidak valid secara
+    ketat untuk shapely versi baru (error 'Points of LinearRing do not
+    form a closed linestring'). Daripada bikin seluruh proses gagal,
+    lapisan yang bermasalah cukup dilewati saja.
+    """
+    try:
+        ax.add_feature(feature, **kwargs)
+    except Exception:
+        pass
+
 # Warna & batas SST ala JMA (dipakai untuk peta SST rata-rata)
 WARNA_JMA = ['#8A2BE2', '#0000FF', '#1E90FF', '#00FFFF', '#00FF00',
              '#ADFF2F', '#FFD700', '#FFA500', '#FF4500', '#FF0000', '#FF00FF']
@@ -126,9 +140,10 @@ def plot_streamline(u, v, hgt, lons, lats, extent, judul, tgl_mulai, tgl_akhir,
     fig = plt.figure(figsize=(13, 6.5))
     ax = plt.axes(projection=ccrs.PlateCarree())
 
-    ax.add_feature(cfeature.LAND, facecolor='#FFFF66', edgecolor='black', linewidth=0.5, zorder=1)
-    ax.add_feature(cfeature.OCEAN, facecolor='#E6F2FF', zorder=0)
-    ax.add_feature(cfeature.BORDERS, linestyle=':', alpha=0.7, zorder=1)
+    tambah_fitur_aman(ax, cfeature.LAND, facecolor='#FFFF66', edgecolor='black', linewidth=0.5, zorder=1)
+    tambah_fitur_aman(ax, cfeature.OCEAN, facecolor='#E6F2FF', zorder=0)
+    tambah_fitur_aman(ax, cfeature.BORDERS, linestyle=':', alpha=0.7, zorder=1)
+    tambah_fitur_aman(ax, cfeature.COASTLINE, linewidth=0.8, zorder=1)
 
     ax.streamplot(lons, lats, u, v, color='blue', linewidth=1.0, density=density,
                   arrowsize=1.2, zorder=2, transform=ccrs.PlateCarree())
@@ -168,8 +183,8 @@ def plot_sst(data, lons, lats, extent, judul, tgl_mulai, tgl_akhir, is_anomali):
     fig = plt.figure(figsize=(11, 5.5))
     ax = plt.axes(projection=ccrs.PlateCarree())
 
-    ax.add_feature(cfeature.LAND, facecolor='white', edgecolor='black', zorder=2)
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, zorder=2)
+    tambah_fitur_aman(ax, cfeature.LAND, facecolor='white', edgecolor='black', zorder=2)
+    tambah_fitur_aman(ax, cfeature.COASTLINE, linewidth=0.8, zorder=2)
 
     if is_anomali:
         plot = ax.contourf(lons, lats, data, levels=np.arange(-2.5, 2.75, 0.25),
