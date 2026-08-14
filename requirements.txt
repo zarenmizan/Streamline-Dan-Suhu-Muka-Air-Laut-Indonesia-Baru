@@ -1,0 +1,7 @@
+streamlit>=1.32
+xarray>=2024.2.0
+netCDF4>=1.6.5
+numpy>=1.26
+matplotlib>=3.8
+cartopy>=0.22
+scipy>=1.12
