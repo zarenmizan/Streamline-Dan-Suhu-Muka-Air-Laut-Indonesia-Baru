@@ -202,9 +202,8 @@ def load_sst(year, start_str, end_str, lon0, lon1, lat0, lat1):
     ds_anom.close()
     return sst, anom, n_time
 
-
 # ============================================================
-# FUNGSI PETA STREAMLINE
+# FUNGSI PETA STREAMLINE (DIBERSIHKAN DARI GEOS ERROR)
 # ============================================================
 def make_streamline(u, v, hgt, start_date, end_date,
                     density_value, skip_value, filter_size,
@@ -212,13 +211,17 @@ def make_streamline(u, v, hgt, start_date, end_date,
     fig = plt.figure(figsize=(14, 7))
     ax = plt.axes(projection=ccrs.PlateCarree())
 
-    ax.add_feature(
-        cfeature.LAND, facecolor="#FFFF66",
-        edgecolor="black", linewidth=0.5, zorder=1
-    )
-    ax.add_feature(cfeature.OCEAN, facecolor="#E6F2FF", zorder=0)
-    ax.add_feature(cfeature.BORDERS, linestyle=":", alpha=0.7, zorder=1)
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.6, zorder=2)
+    # Set extent TERLEBIH DAHULU sebelum menambah feature
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+
+    # Gunakan NaturalEarthFeature resolusi '50m' yang lebih stabil
+    land = cfeature.NaturalEarthFeature('physical', 'land', '50m', facecolor='#FFFF66', edgecolor='black', linewidth=0.5)
+    ocean = cfeature.NaturalEarthFeature('physical', 'ocean', '50m', facecolor='#E6F2FF')
+    borders = cfeature.NaturalEarthFeature('cultural', 'admin_0_boundary_lines_land', '50m', edgecolor='black', linestyle=':', alpha=0.7)
+
+    ax.add_feature(ocean, zorder=0)
+    ax.add_feature(land, zorder=1)
+    ax.add_feature(borders, zorder=2)
 
     lons, lats = np.meshgrid(u.lon.values, u.lat.values)
 
@@ -229,7 +232,7 @@ def make_streamline(u, v, hgt, start_date, end_date,
         linewidth=1.0,
         density=density_value,
         arrowsize=1.2,
-        zorder=2,
+        zorder=3,
         transform=ccrs.PlateCarree(),
     )
 
@@ -247,7 +250,7 @@ def make_streamline(u, v, hgt, start_date, end_date,
                     fontweight="bold",
                     ha="center",
                     va="center",
-                    zorder=3,
+                    zorder=4,
                     transform=ccrs.PlateCarree(),
                 )
 
@@ -269,7 +272,7 @@ def make_streamline(u, v, hgt, start_date, end_date,
                     fontweight="bold",
                     ha="center",
                     va="center",
-                    zorder=4,
+                    zorder=5,
                     bbox=dict(
                         boxstyle="circle,pad=0.2",
                         edgecolor="red",
@@ -279,8 +282,6 @@ def make_streamline(u, v, hgt, start_date, end_date,
                     ),
                     transform=ccrs.PlateCarree(),
                 )
-
-    ax.set_extent(extent, crs=ccrs.PlateCarree())
 
     gl = ax.gridlines(
         draw_labels=True,
@@ -311,18 +312,17 @@ def make_streamline(u, v, hgt, start_date, end_date,
 
 
 # ============================================================
-# FUNGSI PETA SST
+# FUNGSI PETA SST (DIBERSIHKAN DARI GEOS ERROR)
 # ============================================================
 def make_sst_map(data, start_date, end_date, extent, anomaly=False):
     fig = plt.figure(figsize=(13, 6.5))
     ax = plt.axes(projection=ccrs.PlateCarree())
 
-    ax.add_feature(
-        cfeature.LAND, facecolor="white",
-        edgecolor="black", zorder=2
-    )
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, zorder=2)
-    ax.add_feature(cfeature.BORDERS, linestyle=":", alpha=0.5, zorder=2)
+    # Set extent TERLEBIH DAHULU
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+
+    land = cfeature.NaturalEarthFeature('physical', 'land', '50m', facecolor='white', edgecolor='black', linewidth=0.8)
+    borders = cfeature.NaturalEarthFeature('cultural', 'admin_0_boundary_lines_land', '50m', edgecolor='black', linestyle=':', alpha=0.5)
 
     lons, lats = np.meshgrid(data.lon.values, data.lat.values)
 
@@ -363,14 +363,15 @@ def make_sst_map(data, start_date, end_date, extent, anomaly=False):
         label = "Suhu Muka Laut (°C)"
         title = "Suhu Muka Laut (SST) Wilayah Indonesia"
 
+    ax.add_feature(land, zorder=2)
+    ax.add_feature(borders, zorder=2)
+
     cbar = plt.colorbar(
         plot, ax=ax,
         orientation="horizontal",
         pad=0.08, shrink=0.8
     )
     cbar.set_label(label, fontsize=11, fontweight="bold")
-
-    ax.set_extent(extent, crs=ccrs.PlateCarree())
 
     gl = ax.gridlines(
         draw_labels=True,
@@ -397,16 +398,6 @@ def make_sst_map(data, start_date, end_date, extent, anomaly=False):
 
     fig.tight_layout(rect=[0, 0.04, 1, 1])
     return fig
-
-
-def fig_to_png(fig):
-    buffer = io.BytesIO()
-    fig.savefig(
-        buffer, format="png", dpi=300,
-        bbox_inches="tight", pad_inches=0.3
-    )
-    buffer.seek(0)
-    return buffer.getvalue()
 
 
 # ============================================================
