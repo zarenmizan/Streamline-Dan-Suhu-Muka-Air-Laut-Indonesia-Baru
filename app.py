@@ -284,6 +284,7 @@ def make_streamline(u, v, hgt, start_date, end_date,
                 )
 
     gl = ax.gridlines(
+        crs=ccrs.PlateCarree(),  # <-- WAJIB DITAMBAHKAN untuk Shapely 2.0
         draw_labels=True,
         linestyle="--",
         alpha=0.5,
@@ -374,6 +375,7 @@ def make_sst_map(data, start_date, end_date, extent, anomaly=False):
     cbar.set_label(label, fontsize=11, fontweight="bold")
 
     gl = ax.gridlines(
+        crs=ccrs.PlateCarree(),  # <-- WAJIB DITAMBAHKAN untuk Shapely 2.0
         draw_labels=True,
         linestyle="--",
         alpha=0.5,
