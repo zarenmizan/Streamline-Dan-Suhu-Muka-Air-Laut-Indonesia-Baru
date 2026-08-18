@@ -1,4 +1,3 @@
-
 import streamlit as st
 import xarray as xr
 import matplotlib.pyplot as plt
@@ -140,42 +139,49 @@ def load_gfs(start_str, end_str, lon0, lon1, lat0, lat1):
     level_v = 85000 if float(ds[vert_dim_v].max()) > 2000 else 850
     level_h = 85000 if float(ds[vert_dim_h].max()) > 2000 else 850
 
-    # Tetap mengikuti logika notebook: rata-rata seluruh waktu dalam dasarian.
+    # GFS memiliki latitude menurun (-90 ... 90 atau 90 ... -90,
+    # tergantung backend/versi dataset). Buat slice otomatis.
+    lat_values = ds["lat"].values
+    lat_slice = slice(lat0, lat1) if lat_values[0] < lat_values[-1] else slice(lat1, lat0)
+
+    # Ambil subset waktu TERLEBIH DAHULU supaya kita tahu apakah
+    # periode dasarian memang tersedia di dataset GFS.
+    time_selected = ds["time"].sel(time=slice(start_str, end_str))
+    n_time = int(time_selected.sizes.get("time", 0))
+
+    if n_time == 0:
+        ds.close()
+        return None, None, None, 0
+
+    common = dict(
+        lon=slice(lon0, lon1),
+        lat=lat_slice,
+        time=slice(start_str, end_str),
+    )
+
     u = (
-        var_u.sel(
-            lon=slice(lon0, lon1),
-            lat=slice(lat1, lat0),
-            time=slice(start_str, end_str),
-        )
+        var_u.sel(**common)
         .sel({vert_dim_u: level_u}, method="nearest")
         .mean(dim="time")
         .load()
     )
 
     v = (
-        var_v.sel(
-            lon=slice(lon0, lon1),
-            lat=slice(lat1, lat0),
-            time=slice(start_str, end_str),
-        )
+        var_v.sel(**common)
         .sel({vert_dim_v: level_v}, method="nearest")
         .mean(dim="time")
         .load()
     )
 
     hgt = (
-        var_h.sel(
-            lon=slice(lon0, lon1),
-            lat=slice(lat1, lat0),
-            time=slice(start_str, end_str),
-        )
+        var_h.sel(**common)
         .sel({vert_dim_h: level_h}, method="nearest")
         .mean(dim="time")
         .load()
     )
 
     ds.close()
-    return u, v, hgt
+    return u, v, hgt, n_time
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -185,6 +191,14 @@ def load_sst(year, start_str, end_str, lon0, lon1, lat0, lat1):
 
     ds_sst = xr.open_dataset(url_sst)
     ds_anom = xr.open_dataset(url_anom)
+
+    selected_time = ds_sst["time"].sel(time=slice(start_str, end_str))
+    n_time = int(selected_time.sizes.get("time", 0))
+
+    if n_time == 0:
+        ds_sst.close()
+        ds_anom.close()
+        return None, None, 0
 
     sst = (
         ds_sst["sst"]
@@ -210,7 +224,7 @@ def load_sst(year, start_str, end_str, lon0, lon1, lat0, lat1):
 
     ds_sst.close()
     ds_anom.close()
-    return sst, anom
+    return sst, anom, n_time
 
 
 # ============================================================
@@ -449,13 +463,21 @@ with tab1:
 
         try:
             with st.spinner("Mengakses GFS UCAR dan menghitung rata-rata dasarian..."):
-                u, v, hgt = load_gfs(
+                u, v, hgt, n_time_gfs = load_gfs(
                     start_str, end_str,
                     lon_min, lon_max, lat_min, lat_max
                 )
 
-            if u.sizes.get("time", 0) == 0:
-                st.error("Tidak ada data GFS pada periode yang dipilih.")
+            if n_time_gfs == 0:
+                st.warning(
+                    "Tidak ada data GFS pada periode yang dipilih. "
+                    "Dataset GFS 'Best' UCAR adalah dataset operasional real-time "
+                    "dan tidak berfungsi sebagai arsip jangka panjang."
+                )
+                st.info(
+                    "Coba pilih periode yang masih berada dalam rentang data GFS "
+                    "yang tersedia saat ini."
+                )
             else:
                 with st.spinner("Membuat peta streamline..."):
                     fig = make_streamline(
@@ -466,6 +488,10 @@ with tab1:
                     )
 
                 st.pyplot(fig, use_container_width=True)
+                st.success(
+                    f"Peta berhasil dibuat menggunakan {n_time_gfs} timestep GFS "
+                    f"pada periode {tanggal_mulai} s/d {tanggal_akhir}."
+                )
 
                 png = fig_to_png(fig)
                 st.download_button(
@@ -493,12 +519,12 @@ with tab2:
 
         try:
             with st.spinner("Mengakses NOAA OISST dan menghitung rata-rata dasarian..."):
-                sst, anom = load_sst(
+                sst, anom, n_time_sst = load_sst(
                     tahun, start_str, end_str,
                     lon_min, lon_max, lat_min, lat_max
                 )
 
-            if sst.sizes.get("time", 0) == 0:
+            if n_time_sst == 0:
                 st.error("Tidak ada data SST pada periode yang dipilih.")
             else:
                 with st.spinner("Membuat peta SST..."):
@@ -510,6 +536,9 @@ with tab2:
                     )
 
                 st.pyplot(fig_sst, use_container_width=True)
+                st.success(
+                    f"Peta SST/SSTA berhasil dibuat dari {n_time_sst} hari data NOAA OISST."
+                )
                 png_sst = fig_to_png(fig_sst)
                 st.download_button(
                     "⬇️ Download Peta SST (PNG)",
@@ -570,6 +599,11 @@ berbasis **Streamlit**.
 - Data diambil secara online ketika tombol analisis dijalankan.
 - Hasil dirata-ratakan pada periode dasarian yang dipilih.
 - Cache digunakan agar permintaan data yang sama tidak selalu diunduh ulang.
+- Aplikasi memeriksa jumlah timestep/hari yang benar-benar tersedia sebelum
+  membuat peta, sehingga periode kosong tidak lagi dianggap sebagai data valid.
+- Dataset GFS `Best` UCAR adalah **time series forecast operasional real-time**,
+  bukan arsip jangka panjang. Untuk periode yang sudah terlalu lama, gunakan
+  arsip GFS dari NCAR/RDA.
 - Untuk deployment Streamlit Cloud, koneksi internet dari server harus dapat
   mengakses endpoint THREDDS/OPeNDAP sumber data.
 """)
