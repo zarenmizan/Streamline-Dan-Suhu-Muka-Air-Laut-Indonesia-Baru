@@ -44,40 +44,33 @@ st.markdown(
 )
 
 # ============================================================
-# SIDEBAR - PENGATURAN
+# SIDEBAR - PENGATURAN TANGGAL FLEKSIBEL
 # ============================================================
 st.sidebar.header("⚙️ Pengaturan Analisis")
 
-tahun = st.sidebar.number_input(
-    "Tahun", min_value=2000, max_value=2100, value=2026, step=1
+# Menentukan default rentang 7 hari terakhir
+today = date.today()
+default_start = today - timedelta(days=7)
+default_end = today
+
+rentang_tanggal = st.sidebar.date_input(
+    "Pilih Rentang Tanggal",
+    value=(default_start, default_end),
+    max_value=today + timedelta(days=10),
+    help="Pilih tanggal awal dan tanggal akhir analisis."
 )
 
-bulan = st.sidebar.selectbox(
-    "Bulan",
-    list(range(1, 13)),
-    index=7,
-    format_func=lambda x: date(2000, x, 1).strftime("%B")
-)
-
-dasarian = st.sidebar.selectbox(
-    "Dasarian",
-    ["Dasarian I (1–10)", "Dasarian II (11–20)", "Dasarian III (21–akhir bulan)"]
-)
-
-if dasarian.startswith("Dasarian I"):
-    hari_mulai, hari_akhir = 1, 10
-elif dasarian.startswith("Dasarian II"):
-    hari_mulai, hari_akhir = 11, 20
+# Validasi input tanggal (memastikan user memilih 2 tanggal: awal & akhir)
+if isinstance(rentang_tanggal, (tuple, list)) and len(rentang_tanggal) == 2:
+    tanggal_mulai, tanggal_akhir = rentang_tanggal
+elif isinstance(rentang_tanggal, (tuple, list)) and len(rentang_tanggal) == 1:
+    tanggal_mulai = rentang_tanggal[0]
+    tanggal_akhir = rentang_tanggal[0]
 else:
-    hari_mulai = 21
-    # Hari terakhir bulan
-    if bulan == 12:
-        hari_akhir = (date(tahun + 1, 1, 1) - timedelta(days=1)).day
-    else:
-        hari_akhir = (date(tahun, bulan + 1, 1) - timedelta(days=1)).day
+    tanggal_mulai = rentang_tanggal
+    tanggal_akhir = rentang_tanggal
 
-tanggal_mulai = date(tahun, bulan, hari_mulai)
-tanggal_akhir = date(tahun, bulan, hari_akhir)
+tahun = tanggal_mulai.year
 
 st.sidebar.divider()
 st.sidebar.subheader("🌀 Streamline")
@@ -503,7 +496,7 @@ with tab2:
         try:
             with st.spinner("Mengakses NOAA OISST dan menghitung rata-rata dasarian..."):
                 sst, anom, n_time_sst = load_sst(
-                    tahun, start_str, end_str,
+                    tanggal_mulai.year, start_str, end_str,
                     lon_min, lon_max, lat_min, lat_max
                 )
 
