@@ -287,7 +287,7 @@ def make_streamline(u, v, hgt, start_date, end_date,
         draw_labels=True,
         linestyle="--",
         alpha=0.5,
-        color="gray"
+        color="gray",
         xlocs=np.arange(80, 165, 10),  # Menentukan lokasi titik grid secara pasti
         ylocs=np.arange(-35, 35, 10)
     )
@@ -379,7 +379,7 @@ def make_sst_map(data, start_date, end_date, extent, anomaly=False):
         draw_labels=True,
         linestyle="--",
         alpha=0.5,
-        color="gray"
+        color="gray",
         xlocs=np.arange(80, 165, 10),  # Menentukan lokasi titik grid secara pasti
         ylocs=np.arange(-35, 35, 10)
     )
