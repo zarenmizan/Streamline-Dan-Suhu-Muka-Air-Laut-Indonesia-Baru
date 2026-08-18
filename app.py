@@ -1,586 +1,371 @@
+"""
+Aplikasi Streamlit: Streamline Angin & SST Wilayah Indonesia
+Sumber data: NOAA/PSL (OPeNDAP) & UCAR THREDDS (GFS)
+
+Dikembangkan dari notebook riset milik pengguna (Stasiun Klimatologi Jawa Tengah).
+"""
+
+import io
+from datetime import date, timedelta
+
+import numpy as np
 import streamlit as st
 import xarray as xr
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-import numpy as np
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
 import scipy.ndimage as ndimage
-from datetime import date, timedelta
-import io
 
-# ============================================================
+# ==========================================================
 # KONFIGURASI HALAMAN
-# ============================================================
+# ==========================================================
 st.set_page_config(
-    page_title="Analisis Streamline & SST Indonesia",
-    page_icon="🌏",
+    page_title="Streamline & SST Indonesia",
+    page_icon="🌊",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-.main-title {
-    font-size: 30px;
-    font-weight: 700;
-    margin-bottom: 0;
-}
-.subtitle {
-    color: #666;
-    margin-top: 0;
-}
-.stDownloadButton button {
-    width: 100%;
-}
-</style>
-""", unsafe_allow_html=True)
+FOOTER_TEXT = "Data: NOAA/PSL & NCEP GFS  |  @ Stasiun Klimatologi Jawa Tengah"
 
-st.markdown('<p class="main-title">🌏 Analisis Streamline 850 mb & SST Indonesia</p>',
-            unsafe_allow_html=True)
-st.markdown(
-    '<p class="subtitle">Analisis dasarian berbasis GFS 0,25° dan NOAA OISST High Resolution</p>',
-    unsafe_allow_html=True
-)
 
-# ============================================================
-# SIDEBAR - PENGATURAN TANGGAL FLEKSIBEL
-# ============================================================
-st.sidebar.header("⚙️ Pengaturan Analisis")
+def tambah_grid_manual(ax, extent):
+    """Gambar garis grid + label lat/lon tanpa draw_labels=True.
 
-# Menentukan default rentang 7 hari terakhir
-today = date.today()
-default_start = today - timedelta(days=7)
-default_end = today
+    Cartopy punya bug lama pada gridliner (draw_labels=True) yang kadang
+    gagal membentuk poligon batas peta ('Points of LinearRing do not
+    form a closed linestring') saat figure di-render. Cara ini memakai
+    tick manual yang hasilnya sama persis secara visual tapi tidak lewat
+    kode gridliner yang bermasalah.
+    """
+    ax.gridlines(draw_labels=False, linestyle='--', alpha=0.5, color='gray', zorder=5)
 
-rentang_tanggal = st.sidebar.date_input(
-    "Pilih Rentang Tanggal",
-    value=(default_start, default_end),
-    max_value=today + timedelta(days=10),
-    help="Pilih tanggal awal dan tanggal akhir analisis."
-)
+    langkah = 5 if (extent[1] - extent[0]) > 20 else 2
+    xticks = np.arange(np.floor(extent[0] / langkah) * langkah, extent[1] + langkah, langkah)
+    yticks = np.arange(np.floor(extent[2] / langkah) * langkah, extent[3] + langkah, langkah)
+    xticks = xticks[(xticks >= extent[0]) & (xticks <= extent[1])]
+    yticks = yticks[(yticks >= extent[2]) & (yticks <= extent[3])]
 
-# Validasi input tanggal (memastikan user memilih 2 tanggal: awal & akhir)
-if isinstance(rentang_tanggal, (tuple, list)) and len(rentang_tanggal) == 2:
-    tanggal_mulai, tanggal_akhir = rentang_tanggal
-elif isinstance(rentang_tanggal, (tuple, list)) and len(rentang_tanggal) == 1:
-    tanggal_mulai = rentang_tanggal[0]
-    tanggal_akhir = rentang_tanggal[0]
-else:
-    tanggal_mulai = rentang_tanggal
-    tanggal_akhir = rentang_tanggal
+    ax.set_xticks(xticks, crs=ccrs.PlateCarree())
+    ax.set_yticks(yticks, crs=ccrs.PlateCarree())
+    ax.xaxis.set_major_formatter(LongitudeFormatter())
+    ax.yaxis.set_major_formatter(LatitudeFormatter())
+    ax.tick_params(labelsize=9)
 
-tahun = tanggal_mulai.year
 
-st.sidebar.divider()
-st.sidebar.subheader("🌀 Streamline")
+def tambah_fitur_aman(ax, feature, **kwargs):
+    """Tambahkan fitur peta (LAND/OCEAN/COASTLINE/BORDERS) dengan aman.
 
-density = st.sidebar.slider(
-    "Kerapatan streamline", 1.0, 10.0, 7.0, 0.5,
-    help="Semakin besar nilai, semakin rapat garis streamline."
-)
+    Beberapa geometri di data Natural Earth kadang tidak valid secara
+    ketat untuk shapely versi baru (error 'Points of LinearRing do not
+    form a closed linestring'). Daripada bikin seluruh proses gagal,
+    lapisan yang bermasalah cukup dilewati saja.
+    """
+    try:
+        ax.add_feature(feature, **kwargs)
+    except Exception:
+        pass
 
-skip_speed = st.sidebar.slider(
-    "Jarak label kecepatan", 5, 40, 20, 1,
-    help="Semakin besar nilai, semakin jarang angka kecepatan ditampilkan."
-)
+# Warna & batas SST ala JMA (dipakai untuk peta SST rata-rata)
+WARNA_JMA = ['#8A2BE2', '#0000FF', '#1E90FF', '#00FFFF', '#00FF00',
+             '#ADFF2F', '#FFD700', '#FFA500', '#FF4500', '#FF0000', '#FF00FF']
+BATAS_SST = [25.0, 25.5, 26.0, 26.5, 27.0, 27.5, 28.0, 28.5, 29.0, 29.5, 30.0, 31.0]
 
-low_filter = st.sidebar.slider(
-    "Ukuran filter pusat L", 20, 100, 60, 5,
-    help="Ukuran filter yang lebih besar akan menyaring pusat tekanan rendah yang kecil."
-)
 
-st.sidebar.divider()
-st.sidebar.subheader("🗺️ Area Peta")
-
-lon_min, lon_max = st.sidebar.slider(
-    "Bujur", 80, 160, (90, 145), 1
-)
-lat_min, lat_max = st.sidebar.slider(
-    "Lintang", -30, 30, (-15, 15), 1
-)
-
-st.sidebar.divider()
-st.sidebar.caption(
-    "Sumber data: NCEP GFS 0,25° (UCAR THREDDS) dan NOAA OISST High Resolution."
-)
-
-# ============================================================
-# URL DATA
-# ============================================================
-GFS_URL = "https://thredds.ucar.edu/thredds/dodsC/grib/NCEP/GFS/Global_0p25deg/Best"
-
-def noaa_url(prefix, year):
-    return f"https://psl.noaa.gov/thredds/dodsC/Datasets/noaa.oisst.v2.highres/{prefix}.{year}.nc"
-
-# ============================================================
-# CACHE DATA - agar tidak download ulang setiap interaksi
-# ============================================================
+# ==========================================================
+# FUNGSI AMBIL DATA (di-cache biar tidak fetch ulang tiap interaksi)
+# ==========================================================
 @st.cache_data(show_spinner=False, ttl=3600)
-def load_gfs(start_str, end_str, lon0, lon1, lat0, lat1):
-    ds = xr.open_dataset(GFS_URL)
+def ambil_data_streamline_ncep(tahun, tgl_mulai, tgl_akhir, lon_min, lon_max, lat_min, lat_max, level_mb):
+    """Ambil data U, V, HGT dari NCEP/NCAR Reanalysis (data historis, ada lag 2-3 minggu)."""
+    url_u = f"https://psl.noaa.gov/thredds/dodsC/Datasets/ncep.reanalysis.dailyavgs/pressure/uwnd.{tahun}.nc"
+    url_v = f"https://psl.noaa.gov/thredds/dodsC/Datasets/ncep.reanalysis.dailyavgs/pressure/vwnd.{tahun}.nc"
+    url_h = f"https://psl.noaa.gov/thredds/dodsC/Datasets/ncep.reanalysis.dailyavgs/pressure/hgt.{tahun}.nc"
 
-    var_u = ds["u-component_of_wind_isobaric"]
-    var_v = ds["v-component_of_wind_isobaric"]
-    var_h = ds["Geopotential_height_isobaric"]
+    ds_u = xr.open_dataset(url_u)
+    ds_v = xr.open_dataset(url_v)
+    ds_h = xr.open_dataset(url_h)
 
-    vert_dim_u = [d for d in var_u.dims if "isobaric" in d][0]
-    vert_dim_v = [d for d in var_v.dims if "isobaric" in d][0]
-    vert_dim_h = [d for d in var_h.dims if "isobaric" in d][0]
+    lon_slice = slice(lon_min, lon_max)
+    lat_slice = slice(lat_max, lat_min)  # NCEP lat: 90 -> -90, jadi dibalik
 
-    level_u = 85000 if float(ds[vert_dim_u].max()) > 2000 else 850
-    level_v = 85000 if float(ds[vert_dim_v].max()) > 2000 else 850
-    level_h = 85000 if float(ds[vert_dim_h].max()) > 2000 else 850
+    u = ds_u['uwnd'].sel(level=level_mb, time=slice(tgl_mulai, tgl_akhir),
+                          lon=lon_slice, lat=lat_slice).mean(dim='time')
+    v = ds_v['vwnd'].sel(level=level_mb, time=slice(tgl_mulai, tgl_akhir),
+                          lon=lon_slice, lat=lat_slice).mean(dim='time')
+    h = ds_h['hgt'].sel(level=level_mb, time=slice(tgl_mulai, tgl_akhir),
+                         lon=lon_slice, lat=lat_slice).mean(dim='time')
 
-    lat_values = ds["lat"].values
-    lat_slice = slice(lat0, lat1) if lat_values[0] < lat_values[-1] else slice(lat1, lat0)
-
-    # Menambahkan penanganan jam agar slicing waktu Xarray presisi
-    t_start = f"{start_str}T00:00:00"
-    t_end = f"{end_str}T23:59:59"
-
-    time_selected = ds["time"].sel(time=slice(t_start, t_end))
-    n_time = int(time_selected.sizes.get("time", 0))
-
-    if n_time == 0:
-        ds.close()
-        return None, None, None, 0
-
-    common = dict(
-        lon=slice(lon0, lon1),
-        lat=lat_slice,
-        time=slice(t_start, t_end),
-    )
-
-    u = var_u.sel(**common).sel({vert_dim_u: level_u}, method="nearest").mean(dim="time").load()
-    v = var_v.sel(**common).sel({vert_dim_v: level_v}, method="nearest").mean(dim="time").load()
-    hgt = var_h.sel(**common).sel({vert_dim_h: level_h}, method="nearest").mean(dim="time").load()
-
-    ds.close()
-    return u, v, hgt, n_time
+    lons, lats = np.meshgrid(u.lon.values, u.lat.values)
+    return u.values, v.values, h.values, lons, lats
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def load_sst(year, start_str, end_str, lon0, lon1, lat0, lat1):
-    url_sst = noaa_url("sst.day.mean", year)
-    url_anom = noaa_url("sst.day.anom", year)
+def ambil_data_streamline_gfs(tgl_mulai, tgl_akhir, lon_min, lon_max, lat_min, lat_max, level_mb):
+    """Ambil data U, V, HGT dari GFS 0.25° real-time via UCAR THREDDS."""
+    url = "https://thredds.ucar.edu/thredds/dodsC/grib/NCEP/GFS/Global_0p25deg/Best"
+    ds = xr.open_dataset(url)
+
+    var_u = ds['u-component_of_wind_isobaric']
+    var_v = ds['v-component_of_wind_isobaric']
+    var_h = ds['Geopotential_height_isobaric']
+
+    vert_dim_u = [d for d in var_u.dims if 'isobaric' in d][0]
+    vert_dim_v = [d for d in var_v.dims if 'isobaric' in d][0]
+    vert_dim_h = [d for d in var_h.dims if 'isobaric' in d][0]
+
+    def pilih_level(ds, vert_dim, level_mb):
+        return level_mb * 100 if ds[vert_dim].max() > 2000 else level_mb
+
+    lv_u = pilih_level(ds, vert_dim_u, level_mb)
+    lv_v = pilih_level(ds, vert_dim_v, level_mb)
+    lv_h = pilih_level(ds, vert_dim_h, level_mb)
+
+    lon_slice = slice(lon_min, lon_max)
+    lat_slice = slice(lat_max, lat_min)
+
+    u = var_u.sel(lon=lon_slice, lat=lat_slice, time=slice(tgl_mulai, tgl_akhir)) \
+        .sel({vert_dim_u: lv_u}, method='nearest').mean(dim='time')
+    v = var_v.sel(lon=lon_slice, lat=lat_slice, time=slice(tgl_mulai, tgl_akhir)) \
+        .sel({vert_dim_v: lv_v}, method='nearest').mean(dim='time')
+    h = var_h.sel(lon=lon_slice, lat=lat_slice, time=slice(tgl_mulai, tgl_akhir)) \
+        .sel({vert_dim_h: lv_h}, method='nearest').mean(dim='time')
+
+    lons, lats = np.meshgrid(u.lon.values, u.lat.values)
+    return u.values, v.values, h.values, lons, lats
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def ambil_data_sst(tahun, tgl_mulai, tgl_akhir, lon_min, lon_max, lat_min, lat_max):
+    """Ambil data SST harian & anomalinya dari NOAA OISST v2 High Res."""
+    url_sst = f"https://psl.noaa.gov/thredds/dodsC/Datasets/noaa.oisst.v2.highres/sst.day.mean.{tahun}.nc"
+    url_anom = f"https://psl.noaa.gov/thredds/dodsC/Datasets/noaa.oisst.v2.highres/sst.day.anom.{tahun}.nc"
 
     ds_sst = xr.open_dataset(url_sst)
     ds_anom = xr.open_dataset(url_anom)
 
-    selected_time = ds_sst["time"].sel(time=slice(start_str, end_str))
-    n_time = int(selected_time.sizes.get("time", 0))
+    lon_slice = slice(lon_min, lon_max)
+    lat_slice = slice(lat_min, lat_max)  # OISST lat: -90 -> 90 (naik)
 
-    if n_time == 0:
-        ds_sst.close()
-        ds_anom.close()
-        return None, None, 0
+    sst = ds_sst['sst'].sel(time=slice(tgl_mulai, tgl_akhir), lon=lon_slice, lat=lat_slice).mean(dim='time')
+    anom = ds_anom['anom'].sel(time=slice(tgl_mulai, tgl_akhir), lon=lon_slice, lat=lat_slice).mean(dim='time')
 
-    sst = (
-        ds_sst["sst"]
-        .sel(
-            time=slice(start_str, end_str),
-            lon=slice(lon0, lon1),
-            lat=slice(lat0, lat1),
-        )
-        .mean(dim="time")
-        .load()
-    )
-
-    anom = (
-        ds_anom["anom"]
-        .sel(
-            time=slice(start_str, end_str),
-            lon=slice(lon0, lon1),
-            lat=slice(lat0, lat1),
-        )
-        .mean(dim="time")
-        .load()
-    )
-
-    ds_sst.close()
-    ds_anom.close()
-    return sst, anom, n_time
-
-# ============================================================
-# FUNGSI PETA STREAMLINE (DIBERSIHKAN DARI GEOS ERROR)
-# ============================================================
-def make_streamline(u, v, hgt, start_date, end_date,
-                    density_value, skip_value, filter_size,
-                    extent):
-    fig = plt.figure(figsize=(14, 7))
-    ax = plt.axes(projection=ccrs.PlateCarree())
-
-    # Set extent TERLEBIH DAHULU sebelum menambah feature
-    ax.set_extent(extent, crs=ccrs.PlateCarree())
-
-    # Gunakan NaturalEarthFeature resolusi '50m' yang lebih stabil
-    land = cfeature.NaturalEarthFeature('physical', 'land', '50m', facecolor='#FFFF66', edgecolor='black', linewidth=0.5)
-    ocean = cfeature.NaturalEarthFeature('physical', 'ocean', '50m', facecolor='#E6F2FF')
-    borders = cfeature.NaturalEarthFeature('cultural', 'admin_0_boundary_lines_land', '50m', edgecolor='black', linestyle=':', alpha=0.7)
-
-    ax.add_feature(ocean, zorder=0)
-    ax.add_feature(land, zorder=1)
-    ax.add_feature(borders, zorder=2)
-
-    lons, lats = np.meshgrid(u.lon.values, u.lat.values)
-
-    ax.streamplot(
-        lons, lats,
-        u.values, v.values,
-        color="blue",
-        linewidth=1.0,
-        density=density_value,
-        arrowsize=1.2,
-        zorder=3,
-        transform=ccrs.PlateCarree(),
-    )
-
-    speed_kt = np.sqrt(u.values**2 + v.values**2) * 1.94384
-
-    for i in range(0, len(u.lat), skip_value):
-        for j in range(0, len(u.lon), skip_value):
-            spd = speed_kt[i, j]
-            if np.isfinite(spd):
-                ax.text(
-                    lons[i, j], lats[i, j],
-                    f"{int(round(spd))} kt",
-                    color="red",
-                    fontsize=8,
-                    fontweight="bold",
-                    ha="center",
-                    va="center",
-                    zorder=4,
-                    transform=ccrs.PlateCarree(),
-                )
-
-    data_hgt = hgt.values
-    safe_filter = min(filter_size, max(3, min(data_hgt.shape) - 1))
-    local_min = ndimage.minimum_filter(data_hgt, size=safe_filter) == data_hgt
-    min_indices = np.where(local_min)
-
-    for y, x in zip(min_indices[0], min_indices[1]):
-        if 10 < x < len(hgt.lon) - 10 and 10 < y < len(hgt.lat) - 10:
-            if np.isfinite(data_hgt[y, x]):
-                lon_L = float(hgt.lon.values[x])
-                lat_L = float(hgt.lat.values[y])
-
-                ax.text(
-                    lon_L, lat_L, "L",
-                    color="red",
-                    fontsize=18,
-                    fontweight="bold",
-                    ha="center",
-                    va="center",
-                    zorder=5,
-                    bbox=dict(
-                        boxstyle="circle,pad=0.2",
-                        edgecolor="red",
-                        facecolor="white",
-                        alpha=0.9,
-                        lw=1.5,
-                    ),
-                    transform=ccrs.PlateCarree(),
-                )
-
-    gl = ax.gridlines(
-        draw_labels=True,
-        linestyle="--",
-        alpha=0.5,
-        color="gray",
-        xlocs=np.arange(80, 165, 10),  # Menentukan lokasi titik grid secara pasti
-        ylocs=np.arange(-35, 35, 10)
-    )
-    gl.top_labels = False
-    gl.right_labels = False
-
-    ax.set_title(
-        "Analisis Streamline 850 mb & Tekanan Rendah\n"
-        f"Rata-rata Dasarian ({start_date} s/d {end_date})",
-        fontsize=15,
-        fontweight="bold",
-        pad=15,
-    )
-
-    fig.text(
-        0.5, 0.01,
-        "Data: NCEP GFS 0,25° | Stasiun Klimatologi Jawa Tengah",
-        ha="center", va="center",
-        fontsize=11, fontweight="bold", style="italic"
-    )
-
-    fig.tight_layout(rect=[0, 0.03, 1, 1])
-    return fig
+    lons, lats = np.meshgrid(sst.lon.values, sst.lat.values)
+    return sst.values, anom.values, lons, lats
 
 
-# ============================================================
-# FUNGSI PETA SST (DIBERSIHKAN DARI GEOS ERROR)
-# ============================================================
-def make_sst_map(data, start_date, end_date, extent, anomaly=False):
+# ==========================================================
+# FUNGSI VISUALISASI
+# ==========================================================
+def plot_streamline(u, v, hgt, lons, lats, extent, judul, tgl_mulai, tgl_akhir,
+                     density, tampilkan_kecepatan, tampilkan_L, skip):
     fig = plt.figure(figsize=(13, 6.5))
     ax = plt.axes(projection=ccrs.PlateCarree())
 
-    # Set extent TERLEBIH DAHULU
+    tambah_fitur_aman(ax, cfeature.LAND, facecolor='#FFFF66', edgecolor='black', linewidth=0.5, zorder=1)
+    tambah_fitur_aman(ax, cfeature.OCEAN, facecolor='#E6F2FF', zorder=0)
+    tambah_fitur_aman(ax, cfeature.BORDERS, linestyle=':', alpha=0.7, zorder=1)
+    tambah_fitur_aman(ax, cfeature.COASTLINE, linewidth=0.8, zorder=1)
+
+    ax.streamplot(lons, lats, u, v, color='blue', linewidth=1.0, density=density,
+                  arrowsize=1.2, zorder=2, transform=ccrs.PlateCarree())
+
+    if tampilkan_kecepatan:
+        speed_kt = np.sqrt(u ** 2 + v ** 2) * 1.94384
+        for i in range(0, u.shape[0], skip):
+            for j in range(0, u.shape[1], skip):
+                lon_val, lat_val, spd_val = lons[i, j], lats[i, j], speed_kt[i, j]
+                if extent[0] <= lon_val <= extent[1] and extent[2] <= lat_val <= extent[3] and not np.isnan(spd_val):
+                    ax.text(lon_val, lat_val, f"{int(round(spd_val))} kt", color='red', fontsize=9,
+                            fontweight='bold', ha='center', va='center', zorder=3, transform=ccrs.PlateCarree())
+
+    if tampilkan_L:
+        local_min = ndimage.minimum_filter(hgt, size=60) == hgt
+        min_idx = np.where(local_min)
+        for y, x in zip(min_idx[0], min_idx[1]):
+            if 10 < x < hgt.shape[1] - 10 and 10 < y < hgt.shape[0] - 10 and not np.isnan(hgt[y, x]):
+                ax.text(lons[y, x], lats[y, x], 'L', color='red', fontsize=18, fontweight='bold',
+                        ha='center', va='center', zorder=4,
+                        bbox=dict(boxstyle="circle,pad=0.2", edgecolor='red', facecolor='white', alpha=0.9, lw=1.5),
+                        transform=ccrs.PlateCarree())
+
     ax.set_extent(extent, crs=ccrs.PlateCarree())
+    tambah_grid_manual(ax, extent)
 
-    land = cfeature.NaturalEarthFeature('physical', 'land', '50m', facecolor='white', edgecolor='black', linewidth=0.8)
-    borders = cfeature.NaturalEarthFeature('cultural', 'admin_0_boundary_lines_land', '50m', edgecolor='black', linestyle=':', alpha=0.5)
-
-    lons, lats = np.meshgrid(data.lon.values, data.lat.values)
-
-    if anomaly:
-        levels = np.arange(-2.5, 2.75, 0.25)
-        plot = ax.contourf(
-            lons, lats, data.values,
-            levels=levels,
-            cmap="RdBu_r",
-            extend="both",
-            transform=ccrs.PlateCarree(),
-            zorder=1,
-        )
-        label = "Anomali Suhu (°C)"
-        title = "Anomali Suhu Muka Laut (SSTA) Wilayah Indonesia"
-    else:
-        warna_jma = [
-            "#8A2BE2", "#0000FF", "#1E90FF", "#00FFFF",
-            "#00FF00", "#ADFF2F", "#FFD700", "#FFA500",
-            "#FF4500", "#FF0000", "#FF00FF"
-        ]
-        batas_sst = [
-            25.0, 25.5, 26.0, 26.5, 27.0, 27.5,
-            28.0, 28.5, 29.0, 29.5, 30.0, 31.0
-        ]
-        cmap = mcolors.ListedColormap(warna_jma)
-        norm = mcolors.BoundaryNorm(batas_sst, cmap.N)
-
-        plot = ax.contourf(
-            lons, lats, data.values,
-            levels=batas_sst,
-            cmap=cmap,
-            norm=norm,
-            extend="both",
-            transform=ccrs.PlateCarree(),
-            zorder=1,
-        )
-        label = "Suhu Muka Laut (°C)"
-        title = "Suhu Muka Laut (SST) Wilayah Indonesia"
-
-    ax.add_feature(land, zorder=2)
-    ax.add_feature(borders, zorder=2)
-
-    cbar = plt.colorbar(
-        plot, ax=ax,
-        orientation="horizontal",
-        pad=0.08, shrink=0.8
-    )
-    cbar.set_label(label, fontsize=11, fontweight="bold")
-
-    gl = ax.gridlines(
-        draw_labels=True,
-        linestyle="--",
-        alpha=0.5,
-        color="gray",
-        xlocs=np.arange(80, 165, 10),  # Menentukan lokasi titik grid secara pasti
-        ylocs=np.arange(-35, 35, 10)
-    )
-    gl.top_labels = False
-    gl.right_labels = False
-
-    ax.set_title(
-        f"{title}\nRata-rata Dasarian ({start_date} s/d {end_date})",
-        fontsize=14,
-        fontweight="bold",
-        pad=15,
-    )
-
-    fig.text(
-        0.5, 0.01,
-        "Data: NOAA OISST High Resolution | Stasiun Klimatologi Jawa Tengah",
-        ha="center", va="center",
-        fontsize=10, fontweight="bold", style="italic"
-    )
-
-    fig.tight_layout(rect=[0, 0.04, 1, 1])
+    plt.title(f'{judul}\nRata-rata ({tgl_mulai} s/d {tgl_akhir})', fontsize=15, fontweight='bold', pad=15)
+    plt.figtext(0.5, 0.01, FOOTER_TEXT, ha='center', va='center', fontsize=10, fontweight='bold',
+                color='black', style='italic')
+    fig.tight_layout()
     return fig
 
 
-# ============================================================
-# RINGKASAN PARAMETER
-# ============================================================
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Periode", f"{tanggal_mulai} – {tanggal_akhir}")
-c2.metric("Level Angin", "850 mb")
-c3.metric("Resolusi GFS", "0,25°")
-c4.metric("Produk SST", "NOAA OISST")
+def plot_sst(data, lons, lats, extent, judul, tgl_mulai, tgl_akhir, is_anomali):
+    fig = plt.figure(figsize=(11, 5.5))
+    ax = plt.axes(projection=ccrs.PlateCarree())
 
-# ============================================================
-# TABS
-# ============================================================
-tab1, tab2, tab3 = st.tabs([
-    "🌀 Streamline 850 mb",
-    "🌊 SST & SSTA",
-    "ℹ️ Informasi"
-])
+    tambah_fitur_aman(ax, cfeature.LAND, facecolor='white', edgecolor='black', zorder=2)
+    tambah_fitur_aman(ax, cfeature.COASTLINE, linewidth=0.8, zorder=2)
 
-# ============================================================
-# TAB 1 - STREAMLINE
-# ============================================================
-with tab1:
-    st.subheader("🌀 Analisis Streamline 850 mb")
+    if is_anomali:
+        plot = ax.contourf(lons, lats, data, levels=np.arange(-2.5, 2.75, 0.25),
+                            cmap='RdBu_r', extend='both', transform=ccrs.PlateCarree(), zorder=1)
+        label = 'Anomali Suhu (°C)'
+    else:
+        cmap_sst = mcolors.ListedColormap(WARNA_JMA)
+        norm_sst = mcolors.BoundaryNorm(BATAS_SST, cmap_sst.N)
+        plot = ax.contourf(lons, lats, data, levels=BATAS_SST, cmap=cmap_sst, norm=norm_sst,
+                            extend='both', transform=ccrs.PlateCarree(), zorder=1)
+        label = 'Suhu Muka Laut (°C)'
 
-    if st.button("🚀 Buat Peta Streamline", type="primary", use_container_width=True):
-        start_str = tanggal_mulai.isoformat()
-        end_str = tanggal_akhir.isoformat()
+    cbar = plt.colorbar(plot, ax=ax, orientation='horizontal', pad=0.08, shrink=0.8)
+    cbar.set_label(label, fontsize=11, fontweight='bold')
 
-        try:
-            with st.spinner("Mengakses GFS UCAR dan menghitung rata-rata dasarian..."):
-                u, v, hgt, n_time_gfs = load_gfs(
-                    start_str, end_str,
-                    lon_min, lon_max, lat_min, lat_max
-                )
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+    tambah_grid_manual(ax, extent)
 
-            if n_time_gfs == 0:
-                st.warning(
-                    "Tidak ada data GFS pada periode yang dipilih. "
-                    "Dataset GFS 'Best' UCAR adalah dataset operasional real-time "
-                    "dan tidak berfungsi sebagai arsip jangka panjang."
-                )
-                st.info(
-                    "Coba pilih periode yang masih berada dalam rentang data GFS "
-                    "yang tersedia saat ini."
-                )
-            else:
-                with st.spinner("Membuat peta streamline..."):
-                    fig = make_streamline(
-                        u, v, hgt,
-                        tanggal_mulai, tanggal_akhir,
-                        density, skip_speed, low_filter,
-                        [lon_min, lon_max, lat_min, lat_max]
-                    )
+    plt.title(f'{judul}\nRata-rata ({tgl_mulai} s/d {tgl_akhir})', fontsize=14, fontweight='bold', pad=15)
+    plt.figtext(0.5, -0.02, FOOTER_TEXT, ha='center', va='center', fontsize=10, fontweight='bold',
+                color='black', style='italic')
+    fig.tight_layout()
+    return fig
 
-                st.pyplot(fig, use_container_width=True)
-                st.success(
-                    f"Peta berhasil dibuat menggunakan {n_time_gfs} timestep GFS "
-                    f"pada periode {tanggal_mulai} s/d {tanggal_akhir}."
-                )
 
-                png = fig_to_png(fig)
-                st.download_button(
-                    "⬇️ Download Peta Streamline (PNG)",
-                    data=png,
-                    file_name=f"streamline_850mb_{tanggal_mulai}_{tanggal_akhir}.png",
-                    mime="image/png",
-                    use_container_width=True,
-                )
-                plt.close(fig)
+def fig_to_png_bytes(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=300, bbox_inches="tight", pad_inches=0.3)
+    buf.seek(0)
+    return buf
 
-        except Exception as e:
-            st.error("Gagal mengambil atau memproses data GFS.")
-            st.exception(e)
 
-# ============================================================
-# TAB 2 - SST & SSTA
-# ============================================================
-with tab2:
-    st.subheader("🌊 Suhu Muka Laut (SST) dan Anomali SST (SSTA)")
+# ==========================================================
+# SIDEBAR - PENGATURAN WILAYAH (dipakai bersama semua tab)
+# ==========================================================
+st.sidebar.header("⚙️ Pengaturan Wilayah")
+lon_min = st.sidebar.number_input("Longitude min", value=90.0, step=1.0)
+lon_max = st.sidebar.number_input("Longitude max", value=145.0, step=1.0)
+lat_min = st.sidebar.number_input("Latitude min", value=-15.0, step=1.0)
+lat_max = st.sidebar.number_input("Latitude max", value=15.0, step=1.0)
+extent = [lon_min, lon_max, lat_min, lat_max]
 
-    if st.button("🚀 Buat Peta SST & SSTA", type="primary", use_container_width=True):
-        start_str = tanggal_mulai.isoformat()
-        end_str = tanggal_akhir.isoformat()
-
-        try:
-            with st.spinner("Mengakses NOAA OISST dan menghitung rata-rata dasarian..."):
-                sst, anom, n_time_sst = load_sst(
-                    tanggal_mulai.year, start_str, end_str,
-                    lon_min, lon_max, lat_min, lat_max
-                )
-
-            if n_time_sst == 0:
-                st.error("Tidak ada data SST pada periode yang dipilih.")
-            else:
-                with st.spinner("Membuat peta SST..."):
-                    fig_sst = make_sst_map(
-                        sst,
-                        tanggal_mulai, tanggal_akhir,
-                        [lon_min, lon_max, lat_min, lat_max],
-                        anomaly=False
-                    )
-
-                st.pyplot(fig_sst, use_container_width=True)
-                st.success(
-                    f"Peta SST/SSTA berhasil dibuat dari {n_time_sst} hari data NOAA OISST."
-                )
-                png_sst = fig_to_png(fig_sst)
-                st.download_button(
-                    "⬇️ Download Peta SST (PNG)",
-                    data=png_sst,
-                    file_name=f"sst_{tanggal_mulai}_{tanggal_akhir}.png",
-                    mime="image/png",
-                    use_container_width=True,
-                    key="download_sst",
-                )
-                plt.close(fig_sst)
-
-                with st.spinner("Membuat peta SSTA..."):
-                    fig_anom = make_sst_map(
-                        anom,
-                        tanggal_mulai, tanggal_akhir,
-                        [lon_min, lon_max, lat_min, lat_max],
-                        anomaly=True
-                    )
-
-                st.pyplot(fig_anom, use_container_width=True)
-                png_anom = fig_to_png(fig_anom)
-                st.download_button(
-                    "⬇️ Download Peta SSTA (PNG)",
-                    data=png_anom,
-                    file_name=f"ssta_{tanggal_mulai}_{tanggal_akhir}.png",
-                    mime="image/png",
-                    use_container_width=True,
-                    key="download_ssta",
-                )
-                plt.close(fig_anom)
-
-        except Exception as e:
-            st.error("Gagal mengambil atau memproses data NOAA OISST.")
-            st.exception(e)
-
-# ============================================================
-# TAB 3 - INFORMASI
-# ============================================================
-with tab3:
-    st.markdown("""
-### Tentang aplikasi
-
-Aplikasi ini mengubah workflow pada notebook menjadi antarmuka interaktif
-berbasis **Streamlit**.
-
-**Produk yang tersedia:**
-- Streamline angin 850 mb.
-- Deteksi pusat tekanan rendah (L).
-- Label kecepatan angin dalam knot.
-- SST rata-rata dasarian.
-- Anomali SST/SSTA rata-rata dasarian.
-
-**Sumber data:**
-- **NCEP GFS 0,25°** melalui UCAR THREDDS untuk angin 850 mb dan geopotential height.
-- **NOAA OISST High Resolution** melalui NOAA PSL untuk SST dan anomali SST.
-
-**Catatan penting:**
-- Data diambil secara online ketika tombol analisis dijalankan.
-- Hasil dirata-ratakan pada periode dasarian yang dipilih.
-- Cache digunakan agar permintaan data yang sama tidak selalu diunduh ulang.
-- Aplikasi memeriksa jumlah timestep/hari yang benar-benar tersedia sebelum
-  membuat peta, sehingga periode kosong tidak lagi dianggap sebagai data valid.
-- Dataset GFS `Best` UCAR adalah **time series forecast operasional real-time**,
-  bukan arsip jangka panjang. Untuk periode yang sudah terlalu lama, gunakan
-  arsip GFS dari NCAR/RDA.
-- Untuk deployment Streamlit Cloud, koneksi internet dari server harus dapat
-  mengakses endpoint THREDDS/OPeNDAP sumber data.
-""")
-
-st.divider()
-st.caption(
-    "Dikembangkan dari notebook: BIKIN STREAMLINE DAN SST INDO_EDIT.ipynb | "
-    "Stasiun Klimatologi Jawa Tengah"
+st.sidebar.caption(
+    "Default: wilayah Indonesia (90–145°E, 15°S–15°N). "
+    "Ubah sesuai kebutuhan (mis. fokus ke satu region)."
 )
+
+st.title("🌬️🌊 Streamline Angin & SST Wilayah Indonesia")
+st.caption("Dibangun dari script analisis milik Stasiun Klimatologi Jawa Tengah — data NOAA/PSL & NCEP GFS")
+
+tab_streamline, tab_sst = st.tabs(["🌬️ Streamline Angin", "🌊 SST & Anomali"])
+
+# ==========================================================
+# TAB 1 — STREAMLINE
+# ==========================================================
+with tab_streamline:
+    with st.form("form_streamline"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            sumber = st.selectbox(
+                "Sumber data",
+                ["GFS Real-time (UCAR THREDDS)", "NCEP Reanalysis (historis, lag 2-3 minggu)"],
+                help="GFS cocok untuk kondisi terkini/forecast. NCEP Reanalysis cocok untuk data historis dasarian.",
+            )
+        with col2:
+            level_mb = st.selectbox("Level tekanan (mb)", [925, 850, 700, 500], index=1)
+        with col3:
+            density = st.slider("Kerapatan garis (density)", 2.0, 10.0, 7.0, 0.5)
+
+        col4, col5 = st.columns(2)
+        with col4:
+            tgl_mulai = st.date_input("Tanggal mulai", value=date.today() - timedelta(days=10))
+        with col5:
+            tgl_akhir = st.date_input("Tanggal akhir", value=date.today())
+
+        col6, col7 = st.columns(2)
+        with col6:
+            tampilkan_kecepatan = st.checkbox("Tampilkan label kecepatan (knot)", value=True)
+        with col7:
+            tampilkan_L = st.checkbox("Tampilkan pusat tekanan rendah (L)", value=True)
+
+        submit_streamline = st.form_submit_button("🗺️ Buat Peta Streamline", use_container_width=True)
+
+    if submit_streamline:
+        if tgl_mulai > tgl_akhir:
+            st.error("Tanggal mulai harus sebelum tanggal akhir.")
+        else:
+            try:
+                with st.spinner(f"Mengambil data dari {sumber}..."):
+                    if sumber.startswith("GFS"):
+                        u, v, hgt, lons, lats = ambil_data_streamline_gfs(
+                            str(tgl_mulai), str(tgl_akhir), lon_min, lon_max, lat_min, lat_max, level_mb)
+                    else:
+                        tahun = tgl_mulai.year
+                        u, v, hgt, lons, lats = ambil_data_streamline_ncep(
+                            tahun, str(tgl_mulai), str(tgl_akhir), lon_min, lon_max, lat_min, lat_max, level_mb)
+
+                if np.all(np.isnan(u)):
+                    st.warning("⚠️ Semua data kosong untuk rentang tanggal/wilayah ini. Coba ganti tanggal.")
+                else:
+                    with st.spinner("Menggambar peta..."):
+                        fig = plot_streamline(
+                            u, v, hgt, lons, lats, extent,
+                            f"Analisis Streamline {level_mb} mb & Tekanan Rendah",
+                            tgl_mulai, tgl_akhir, density, tampilkan_kecepatan, tampilkan_L,
+                            skip=max(1, u.shape[0] // 12),
+                        )
+                    st.pyplot(fig, use_container_width=True)
+                    st.download_button(
+                        "⬇️ Unduh PNG", data=fig_to_png_bytes(fig),
+                        file_name=f"streamline_{tgl_mulai}_{tgl_akhir}.png", mime="image/png",
+                    )
+            except Exception as e:
+                st.error(f"Gagal mengambil/memproses data: {e}")
+
+# ==========================================================
+# TAB 2 — SST & ANOMALI
+# ==========================================================
+with tab_sst:
+    with st.form("form_sst"):
+        col1, col2 = st.columns(2)
+        with col1:
+            tgl_mulai_sst = st.date_input("Tanggal mulai ", value=date.today() - timedelta(days=10), key="sst_mulai")
+        with col2:
+            tgl_akhir_sst = st.date_input("Tanggal akhir ", value=date.today(), key="sst_akhir")
+
+        submit_sst = st.form_submit_button("🌡️ Buat Peta SST & Anomali", use_container_width=True)
+
+    if submit_sst:
+        if tgl_mulai_sst > tgl_akhir_sst:
+            st.error("Tanggal mulai harus sebelum tanggal akhir.")
+        else:
+            try:
+                tahun = tgl_mulai_sst.year
+                with st.spinner("Mengambil data SST dari NOAA OISST..."):
+                    sst, anom, lons, lats = ambil_data_sst(
+                        tahun, str(tgl_mulai_sst), str(tgl_akhir_sst), lon_min, lon_max, lat_min, lat_max)
+
+                if np.all(np.isnan(sst)):
+                    st.warning("⚠️ Semua data kosong untuk rentang tanggal/wilayah ini. Coba ganti tanggal.")
+                else:
+                    colA, colB = st.columns(2)
+                    with colA:
+                        fig_sst = plot_sst(sst, lons, lats, extent, "Suhu Muka Laut (SST) Wilayah Indonesia",
+                                           tgl_mulai_sst, tgl_akhir_sst, is_anomali=False)
+                        st.pyplot(fig_sst, use_container_width=True)
+                        st.download_button("⬇️ Unduh PNG (SST)", data=fig_to_png_bytes(fig_sst),
+                                            file_name=f"sst_mean_{tgl_mulai_sst}_{tgl_akhir_sst}.png",
+                                            mime="image/png", key="dl_sst")
+                    with colB:
+                        fig_anom = plot_sst(anom, lons, lats, extent, "Anomali Suhu Muka Laut (SSTA) Wilayah Indonesia",
+                                            tgl_mulai_sst, tgl_akhir_sst, is_anomali=True)
+                        st.pyplot(fig_anom, use_container_width=True)
+                        st.download_button("⬇️ Unduh PNG (Anomali)", data=fig_to_png_bytes(fig_anom),
+                                            file_name=f"sst_anomaly_{tgl_mulai_sst}_{tgl_akhir_sst}.png",
+                                            mime="image/png", key="dl_anom")
+            except Exception as e:
+                st.error(f"Gagal mengambil/memproses data: {e}")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Dibuat dengan Streamlit • Data: NOAA/PSL & NCEP GFS via OPeNDAP/THREDDS")
