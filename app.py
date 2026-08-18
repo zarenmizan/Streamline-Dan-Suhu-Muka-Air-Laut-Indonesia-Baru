@@ -139,14 +139,14 @@ def load_gfs(start_str, end_str, lon0, lon1, lat0, lat1):
     level_v = 85000 if float(ds[vert_dim_v].max()) > 2000 else 850
     level_h = 85000 if float(ds[vert_dim_h].max()) > 2000 else 850
 
-    # GFS memiliki latitude menurun (-90 ... 90 atau 90 ... -90,
-    # tergantung backend/versi dataset). Buat slice otomatis.
     lat_values = ds["lat"].values
     lat_slice = slice(lat0, lat1) if lat_values[0] < lat_values[-1] else slice(lat1, lat0)
 
-    # Ambil subset waktu TERLEBIH DAHULU supaya kita tahu apakah
-    # periode dasarian memang tersedia di dataset GFS.
-    time_selected = ds["time"].sel(time=slice(start_str, end_str))
+    # Menambahkan penanganan jam agar slicing waktu Xarray presisi
+    t_start = f"{start_str}T00:00:00"
+    t_end = f"{end_str}T23:59:59"
+
+    time_selected = ds["time"].sel(time=slice(t_start, t_end))
     n_time = int(time_selected.sizes.get("time", 0))
 
     if n_time == 0:
@@ -156,29 +156,12 @@ def load_gfs(start_str, end_str, lon0, lon1, lat0, lat1):
     common = dict(
         lon=slice(lon0, lon1),
         lat=lat_slice,
-        time=slice(start_str, end_str),
+        time=slice(t_start, t_end),
     )
 
-    u = (
-        var_u.sel(**common)
-        .sel({vert_dim_u: level_u}, method="nearest")
-        .mean(dim="time")
-        .load()
-    )
-
-    v = (
-        var_v.sel(**common)
-        .sel({vert_dim_v: level_v}, method="nearest")
-        .mean(dim="time")
-        .load()
-    )
-
-    hgt = (
-        var_h.sel(**common)
-        .sel({vert_dim_h: level_h}, method="nearest")
-        .mean(dim="time")
-        .load()
-    )
+    u = var_u.sel(**common).sel({vert_dim_u: level_u}, method="nearest").mean(dim="time").load()
+    v = var_v.sel(**common).sel({vert_dim_v: level_v}, method="nearest").mean(dim="time").load()
+    hgt = var_h.sel(**common).sel({vert_dim_h: level_h}, method="nearest").mean(dim="time").load()
 
     ds.close()
     return u, v, hgt, n_time
